@@ -3,7 +3,7 @@
 
 # # Attention - Qutorch
 
-# In[1]:
+# In[10]:
 
 
 import numpy as np
@@ -16,7 +16,7 @@ from deepquantum import Circuit
 from deepquantum.utils import dag,measure_state,ptrace,multi_kron,encoding
 
 
-# In[2]:
+# In[11]:
 
 
 def measure(state,n_qubits):
@@ -24,10 +24,7 @@ def measure(state,n_qubits):
     for i in range(n_qubits):
         cir.z_gate(i)
     m=cir.get()
-    return measure_state(state,m)
-
-
-# In[3]:
+    return measure_state(state,m,rho=False)
 
 
 class init_cir_q(nn.Module):
@@ -55,6 +52,11 @@ class init_cir_q(nn.Module):
             cir.rx(which_q,w[which_q*3+0])
             cir.ry(which_q,w[which_q*3+1])       
             cir.rz(which_q,w[which_q*3+2])
+        #ring cnot gates
+        for which_q in range(0,self.n_qubits-1):
+            cir.cnot(which_q,which_q+1)
+        if self.n_qubits>1:
+            cir.cnot(self.n_qubits-1,0)
         return cir.get()
 
     def forward(self, x):
@@ -63,7 +65,7 @@ class init_cir_q(nn.Module):
         return queryQ_out
 
 
-# In[4]:
+# In[15]:
 
 
 class init_cir_k(nn.Module):
@@ -91,6 +93,11 @@ class init_cir_k(nn.Module):
             cir.rx(which_q,w[which_q*3+0])
             cir.ry(which_q,w[which_q*3+1])       
             cir.rz(which_q,w[which_q*3+2])
+        #ring cnot gates
+        for which_q in range(0,self.n_qubits-1):
+            cir.cnot(which_q,which_q+1)
+        if self.n_qubits>1:
+            cir.cnot(self.n_qubits-1,0)
         return cir.get()
 
 
@@ -100,7 +107,7 @@ class init_cir_k(nn.Module):
         return keyQ_out
 
 
-# In[5]:
+# In[16]:
 
 
 class init_cir_v(nn.Module):
@@ -128,6 +135,11 @@ class init_cir_v(nn.Module):
             cir.rx(which_q,w[which_q*3+0])
             cir.ry(which_q,w[which_q*3+1])       
             cir.rz(which_q,w[which_q*3+2])
+        #ring cnot gates
+        for which_q in range(0,self.n_qubits-1):
+            cir.cnot(which_q,which_q+1)
+        if self.n_qubits>1:
+            cir.cnot(self.n_qubits-1,0)
         return cir.get()
 
 
@@ -137,7 +149,7 @@ class init_cir_v(nn.Module):
         return valueQ_out
 
 
-# In[6]:
+# In[17]:
 
 
 def cal_query_key(queryQ_out, keyQ_out, dim_q, dim_k):
@@ -150,9 +162,12 @@ def cal_query_key(queryQ_out, keyQ_out, dim_q, dim_k):
     out = torch.kron(queryQ_out, keyQ_out)
     n_qubits = dim_q + dim_k
     
+    #对称cnot门
     cir=Circuit(n_qubits)
-    for t in range(dim_k):
+    for t in range(0,dim_k,1):
         cir.cnot(t,n_qubits-dim_k+t)
+    for t in range(dim_k-1,-1,-1):
+        cir.cnot(n_qubits-dim_k+t,t)
     U=cir.get()
     
     out=U @ out @ dag(U)
@@ -162,7 +177,7 @@ def cal_query_key(queryQ_out, keyQ_out, dim_q, dim_k):
     return quantum_score
 
 
-# In[7]:
+# In[26]:
 
 
 def cal_src_value(quantum_src, valueQ_out, dim_s, dim_v):
@@ -171,12 +186,29 @@ def cal_src_value(quantum_src, valueQ_out, dim_s, dim_v):
     """计算经过attention score加权作用后的value
     """
     src=quantum_src.mean()
-    phi=(src-0.5)*2*np.pi #phi=[-pi,pi]
+    #src=(src+1.0)/2.0     #[-1,1] -> [0,1]
+    #phi=(src-0.5)*2*np.pi #phi=[-pi,pi]
+    phi=src*np.pi   #phi=[-pi,pi]
     
+    #rx-ringCnot-ry-RingCnot-rz
     cir=Circuit(dim_v)
     for i in range(dim_v):
         cir.rx(i,phi*0.5)
+        
+    for which_q in range(0,dim_v-1):
+        cir.cnot(which_q,which_q+1)
+    if dim_v>1:
+        cir.cnot(dim_v-1,0)
+        
+    for i in range(dim_v):
         cir.ry(i,phi*0.5)
+        
+    for which_q in range(0,dim_v-1):
+        cir.cnot(which_q,which_q+1)
+    if dim_v>1:
+        cir.cnot(dim_v-1,0)
+        
+    for i in range(dim_v):
         cir.rz(i,phi)
     U=cir.get()
     
@@ -185,27 +217,30 @@ def cal_src_value(quantum_src, valueQ_out, dim_s, dim_v):
     return quantum_weighted_value
 
 
-# In[18]:
+# In[27]:
 
 
 def cal_output(qwv_list, dim):
     """计算weighted values的“和”（通过多个cnot门将信息融合）
     """
-    out = multi_kron(qwv_list)
-    n_qubits=len(qwv_list)*dim
-    cir=Circuit(n_qubits)
-    for i in range(len(qwv_list)-1):
-        for t in range(dim):
-            cir.cnot(i*dim+t,n_qubits-dim+t)            
+    #out = multi_kron(qwv_list)
+    #n_qubits=2*dim
+    cir=Circuit(2*dim)
+    for t in range(dim):
+        cir.cnot(t,dim+t)            
     U=cir.get()
     
-    out=U @ out @ dag(U)
+    #为避免线路上比特数过多，两个两个处理
+    attnQ=qwv_list[-1]
+    for i in range(len(qwv_list)-1):
+        out=torch.kron(qwv_list[i],attnQ)
+        out=U @ out @ dag(U)
+        attnQ = ptrace(out, dim, dim)
         
-    attnQ = ptrace(out, dim, n_qubits-dim)
     return attnQ
 
 
-# In[61]:
+# In[28]:
 
 
 def q_attention(query, key, value, mask=None, dropout=None):
@@ -265,7 +300,7 @@ def q_attention(query, key, value, mask=None, dropout=None):
     return torch.cat(outputs)
 
 
-# In[80]:
+# In[29]:
 
 
 class Q_MultiHeadedAttention(nn.Module):
@@ -299,6 +334,8 @@ class Q_MultiHeadedAttention(nn.Module):
         #print(self.n_qubits)
         #print(self.linear)
         return self.linear(x)
+
+
 
 
 
